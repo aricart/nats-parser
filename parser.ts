@@ -1,4 +1,23 @@
-export const MAX_CONTROL_LINE_SIZE = 4096;
+import { Dispatcher } from "./queued_iterator.ts";
+import { Buffer } from "./buffer.ts";
+
+export type PING = "ping";
+export type PONG = "pong";
+export type OK = "ok";
+export interface Err {
+  message: string;
+}
+export interface Info {
+  info: Uint8Array;
+}
+export interface Msg {
+  msg: MsgArg;
+  data: Uint8Array;
+}
+
+const MAX_CONTROL_LINE_SIZE = 4096;
+
+export type ParserEvents = PING | PONG | OK | Err | Info | Msg;
 
 export interface MsgArg {
   subject: Uint8Array;
@@ -95,19 +114,23 @@ enum cc {
   TAB = "\t".charCodeAt(0),
 }
 
-const decoder = new TextDecoder();
+const td = new TextDecoder();
 
 export class Parser {
+  dispatcher: Dispatcher<ParserEvents>;
   state: State = State.OP_START;
   as: number = 0;
   drop: number = 0;
   hdr: number = 0;
   ma: MsgArg = {} as MsgArg;
   argBuf?: Uint8Array;
-  msgBuf?: Uint8Array;
+  msgBuf?: Buffer;
+  scratch: Buffer;
 
-  constructor() {
+  constructor(dispatcher: Dispatcher<ParserEvents>) {
+    this.dispatcher = dispatcher;
     this.state = State.OP_START;
+    this.scratch = new Buffer(new Uint8Array(MAX_CONTROL_LINE_SIZE));
   }
 
   parse(buf: Uint8Array): void {
@@ -144,9 +167,7 @@ export class Parser {
               this.state = State.OP_I;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_H:
@@ -156,9 +177,7 @@ export class Parser {
               this.state = State.OP_M;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_M:
@@ -168,9 +187,7 @@ export class Parser {
               this.state = State.OP_MS;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_MS:
@@ -180,9 +197,17 @@ export class Parser {
               this.state = State.OP_MSG;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
+          }
+          break;
+        case State.OP_MSG:
+          switch (b) {
+            case cc.SPACE:
+            case cc.TAB:
+              this.state = State.OP_MSG_SPC;
+              break;
+            default:
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_MSG_SPC:
@@ -201,19 +226,17 @@ export class Parser {
               this.drop = 1;
               break;
             case cc.NL:
-              const arg: Uint8Array = this.argBuf ??
-                buf.subarray(this.as, i - this.drop);
-              const err = this.processMsgArgs(arg);
-              if (err) {
-                throw err;
-              }
+              const arg: Uint8Array = this.argBuf
+                ? this.argBuf
+                : buf.subarray(this.as, i - this.drop);
+              this.processMsgArgs(arg);
               this.drop = 0;
               this.as = i + 1;
               this.state = State.MSG_PAYLOAD;
 
               // jump ahead with the index. If this overruns
               // what is left we fall out and process a split buffer.
-              i = this.as + this.ma.size;
+              i = this.as + this.ma.size - 1;
               break;
             default:
               if (this.argBuf) {
@@ -224,9 +247,10 @@ export class Parser {
         case State.MSG_PAYLOAD:
           if (this.msgBuf) {
             if (this.msgBuf.length >= this.ma.size) {
-              processMsg(this.ma, this.msgBuf);
-              this.argBuf = new Uint8Array(0);
-              this.msgBuf = new Uint8Array(0);
+              const data = this.msgBuf.bytes({ copy: false });
+              this.dispatcher.push({ msg: this.ma, data: data });
+              this.argBuf = undefined;
+              this.msgBuf = undefined;
               this.state = State.MSG_END;
             } else {
               let toCopy = this.ma.size - this.msgBuf.length;
@@ -237,18 +261,18 @@ export class Parser {
               }
 
               if (toCopy > 0) {
-                const start = this.msgBuf.length;
-                this.msgBuf = this.msgBuf.subarray(0, start + toCopy);
-                this.msgBuf.set(buf.subarray(i, i + toCopy), start);
+                this.msgBuf.write(buf.subarray(i, i + toCopy));
                 i = (i + toCopy) - 1;
               } else {
-                this.msgBuf = append(this.msgBuf, b);
+                this.msgBuf.write(Uint8Array.of(b));
               }
             }
           } else if (i - this.as >= this.ma.size) {
-            processMsg(this.ma, buf.subarray(this.as, i));
-            this.argBuf = new Uint8Array(0);
-            this.msgBuf = new Uint8Array(0);
+            this.dispatcher.push(
+              { msg: this.ma, data: buf.subarray(this.as, i) },
+            );
+            this.argBuf = undefined;
+            this.msgBuf = undefined;
             this.state = State.MSG_END;
           }
           break;
@@ -270,9 +294,7 @@ export class Parser {
               this.state = State.OP_PLUS_O;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_PLUS_O:
@@ -282,15 +304,13 @@ export class Parser {
               this.state = State.OP_PLUS_OK;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_PLUS_OK:
           switch (b) {
             case cc.NL:
-              processOK();
+              this.dispatcher.push("ok");
               this.drop = 0;
               this.state = State.OP_START;
               break;
@@ -303,9 +323,7 @@ export class Parser {
               this.state = State.OP_MINUS_E;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_MINUS_E:
@@ -315,9 +333,7 @@ export class Parser {
               this.state = State.OP_MINUS_ER;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_MINUS_ER:
@@ -327,9 +343,7 @@ export class Parser {
               this.state = State.OP_MINUS_ERR;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_MINUS_ERR:
@@ -339,9 +353,7 @@ export class Parser {
               this.state = State.OP_MINUS_ERR_SPC;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_MINUS_ERR_SPC:
@@ -367,7 +379,7 @@ export class Parser {
               } else {
                 arg = buf.subarray(this.as, i - this.drop);
               }
-              processError(decoder.decode(arg));
+              this.dispatcher.push({ message: td.decode(arg) });
               this.drop = 0;
               this.as = i + 1;
               this.state = State.OP_START;
@@ -389,9 +401,7 @@ export class Parser {
               this.state = State.OP_PO;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_PO:
@@ -401,9 +411,7 @@ export class Parser {
               this.state = State.OP_PON;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_PON:
@@ -413,15 +421,13 @@ export class Parser {
               this.state = State.OP_PONG;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_PONG:
           switch (b) {
             case cc.NL:
-              processPong();
+              this.dispatcher.push("pong");
               this.drop = 0;
               this.state = State.OP_START;
               break;
@@ -434,9 +440,7 @@ export class Parser {
               this.state = State.OP_PIN;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_PIN:
@@ -446,15 +450,13 @@ export class Parser {
               this.state = State.OP_PING;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_PING:
           switch (b) {
             case cc.NL:
-              processPing();
+              this.dispatcher.push("ping");
               this.drop = 0;
               this.state = State.OP_START;
               break;
@@ -467,9 +469,7 @@ export class Parser {
               this.state = State.OP_IN;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_IN:
@@ -479,9 +479,7 @@ export class Parser {
               this.state = State.OP_INF;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_INF:
@@ -491,9 +489,7 @@ export class Parser {
               this.state = State.OP_INFO;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_INFO:
@@ -503,9 +499,7 @@ export class Parser {
               this.state = State.OP_INFO_SPC;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
         case State.OP_INFO_SPC:
@@ -531,15 +525,13 @@ export class Parser {
               } else {
                 arg = buf.subarray(this.as, i - this.drop);
               }
-              processInfo(arg);
+              this.dispatcher.push({ info: arg });
               this.drop = 0;
               this.as = i + 1;
               this.state = State.OP_START;
               break;
             default:
-              throw new Error(
-                `parse error [${this.state}] ${buf.subarray(i)}`,
-              );
+              throw this.fail(buf.subarray(i));
           }
           break;
       }
@@ -547,7 +539,7 @@ export class Parser {
 
     if (
       (this.state === State.MSG_ARG || this.state === State.MINUS_ERR_ARG ||
-        this.state === State.INFO_ARG) && this.argBuf
+        this.state === State.INFO_ARG) && !this.argBuf
     ) {
       this.argBuf = concat(this.argBuf, buf.subarray(this.as, i - this.drop));
     }
@@ -557,8 +549,7 @@ export class Parser {
         this.cloneMsgArg();
       }
       // FIXME - need to have buffers to grow and reuse space
-      this.msgBuf = new Uint8Array(this.ma.size);
-      this.msgBuf.set(buf.subarray(this.as));
+      this.msgBuf = new Buffer(buf.subarray(this.as));
     }
   }
 
@@ -572,7 +563,7 @@ export class Parser {
     }
   }
 
-  processMsgArgs(arg: Uint8Array): (Error | void) {
+  processMsgArgs(arg: Uint8Array): void {
     if (this.hdr >= 0) {
       return this.processHeaderMsgArgs(arg);
     }
@@ -593,7 +584,7 @@ export class Parser {
           break;
         default:
           if (start < 0) {
-            start = 0;
+            start = i;
           }
       }
     }
@@ -604,29 +595,39 @@ export class Parser {
     switch (args.length) {
       case 3:
         this.ma.subject = args[0];
-        this.ma.sid = parseInt(decoder.decode(args[1]));
+        this.ma.sid = this.protoParseInt(args[1]);
         this.ma.reply = undefined;
-        this.ma.size = parseInt(decoder.decode(args[2]));
+        this.ma.size = this.protoParseInt(args[2]);
         break;
       case 4:
         this.ma.subject = args[0];
-        this.ma.sid = parseInt(decoder.decode(args[1]));
+        this.ma.sid = this.protoParseInt(args[1]);
         this.ma.reply = args[2];
-        this.ma.size = parseInt(decoder.decode(args[3]));
+        this.ma.size = this.protoParseInt(args[3]);
         break;
       default:
-        return new Error(`processMsgArgs Parse Error: ${arg}`);
+        throw this.fail(arg, "processMsgArgs Parse Error");
     }
 
     if (this.ma.sid < 0) {
-      return new Error(`processMsgArgs Bad or Missing Sid Error: ${arg}`);
+      throw this.fail(arg, "processMsgArgs Bad or Missing Sid Error");
     }
     if (this.ma.size < 0) {
-      return new Error(`processMsgArgs Bad or Missing Size Error: ${arg}`);
+      throw this.fail(arg, "processMsgArgs Bad or Missing Size Error");
     }
   }
 
-  processHeaderMsgArgs(arg: Uint8Array): (Error | void) {
+  fail(data: Uint8Array, label: string = ""): Error {
+    if (!label) {
+      label = `parse error [${this.state}]`;
+    } else {
+      label = `${label} [${this.state}]`;
+    }
+
+    return new Error(`${label}: ${td.decode(data)}`);
+  }
+
+  processHeaderMsgArgs(arg: Uint8Array): void {
     const args: Uint8Array[] = [];
     let start = -1;
     for (let i = 0; i < arg.length; i++) {
@@ -654,60 +655,45 @@ export class Parser {
     switch (args.length) {
       case 4:
         this.ma.subject = args[0];
-        this.ma.sid = parseInt(decoder.decode(args[1]));
+        this.ma.sid = this.protoParseInt(args[1]);
         this.ma.reply = undefined;
-        this.ma.hdr = parseInt(decoder.decode(args[2]));
-        this.ma.size = parseInt(decoder.decode(args[3]));
+        this.ma.hdr = this.protoParseInt(args[2]);
+        this.ma.size = this.protoParseInt(args[3]);
         break;
       case 5:
         this.ma.subject = args[0];
-        this.ma.sid = parseInt(decoder.decode(args[1]));
+        this.ma.sid = this.protoParseInt(args[1]);
         this.ma.reply = args[2];
-        this.ma.hdr = parseInt(decoder.decode(args[3]));
-        this.ma.size = parseInt(decoder.decode(args[4]));
+        this.ma.hdr = this.protoParseInt(args[3]);
+        this.ma.size = this.protoParseInt(args[4]);
         break;
       default:
-        return new Error(`processHeaderMsgArgs Parse Error: ${arg}`);
+        throw this.fail(arg, "processHeaderMsgArgs Parse Error");
     }
 
     if (this.ma.sid < 0) {
-      return new Error(`processHeaderMsgArgs Bad or Missing Sid Error: ${arg}`);
+      throw this.fail(arg, "ProcessHeaderMsgArgs Bad or Missing Sid Error");
     }
     if (this.ma.hdr < 0 || this.ma.hdr > this.ma.size) {
-      return new Error(
-        `processHeaderMsgArgs Bad or Missing Header Size Error: ${arg}`,
+      throw this.fail(
+        arg,
+        "processHeaderMsgArgs Bad or Missing Header Size Error",
       );
     }
     if (this.ma.size < 0) {
-      return new Error(
-        `processHeaderMsgArgs Bad or Missing Size Error: ${arg}`,
-      );
+      throw this.fail(arg, "processHeaderMsgArgs Bad or Missing Size Error");
     }
   }
-}
 
-function processInfo(ia: Uint8Array) {
-  console.log(`INFO ${decoder.decode(ia)}`);
-}
-
-function processPing() {
-  console.log("PING");
-}
-
-function processPong() {
-  console.log("PONG");
-}
-
-function processOK() {
-  console.log("OK");
-}
-
-function processError(s: string) {
-  console.log(`ERR: ${s}`);
-}
-
-function processMsg(ma: MsgArg, data: Uint8Array) {
-  console.log(`MSG`);
-  console.table(ma);
-  console.log(decoder.decode(data));
+  protoParseInt(a: Uint8Array): number {
+    try {
+      const v = parseInt(td.decode(a));
+      if (isNaN(v)) {
+        return -1;
+      }
+      return v;
+    } catch (err) {
+      return -1;
+    }
+  }
 }
