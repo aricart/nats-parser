@@ -10,7 +10,7 @@ export function deferred<T>(): Deferred<T> {
     methods = { resolve, reject };
   });
 
-  return Object.assign(p, methods!) as Deferred<T>;
+  return Object.assign(p, methods) as Deferred<T>;
 }
 
 export interface Dispatcher<T> {

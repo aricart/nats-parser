@@ -1,4 +1,19 @@
-import { Err, Info, Msg, Parser, ParserEvents, State } from "./parser.ts";
+/*
+ * Copyright 2020 The NATS Authors
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { Kind, Parser, ParserEvent, State } from "./parser.ts";
 import {
   assertEquals,
   assertThrows,
@@ -9,40 +24,48 @@ import { Dispatcher } from "./queued_iterator.ts";
 let te = new TextEncoder();
 const td = new TextDecoder();
 
-class NoopDispatcher implements Dispatcher<ParserEvents> {
-  push(a: ParserEvents): void {}
+class NoopDispatcher implements Dispatcher<ParserEvent> {
+  push(a: ParserEvent): void {}
 }
 
-class TestDispatcher implements Dispatcher<ParserEvents> {
+class TestDispatcher implements Dispatcher<ParserEvent> {
   count = 0;
   pings = 0;
   pongs = 0;
   ok = 0;
-  errs: Err[] = [];
-  infos: Info[] = [];
-  msgs: Msg[] = [];
+  errs: ParserEvent[] = [];
+  infos: ParserEvent[] = [];
+  msgs: ParserEvent[] = [];
 
-  push(a: ParserEvents): void {
+  push(a: ParserEvent): void {
     this.count++;
-    if (typeof a === "object" && "msg" in a) {
-      this.msgs.push(a);
-    } else if (typeof a === "object" && "info" in a) {
-      this.infos.push(a);
-    } else if (typeof a === "object" && "message" in a) {
-      this.errs.push(a);
-    } else if (a === "ping") {
-      this.pings++;
-    } else if (a === "pong") {
-      this.pongs++;
-    } else if (a === "ok") {
-      this.ok++;
-    } else {
-      throw new Error(`unknown parser evert ${a}`);
+    switch (a.kind) {
+      case Kind.OK:
+        this.ok++;
+        break;
+      case Kind.ERR:
+        this.errs.push(a);
+        break;
+      case Kind.MSG:
+        this.msgs.push(a);
+        break;
+      case Kind.INFO:
+        this.infos.push(a);
+        break;
+      case Kind.PING:
+        this.pings++;
+        break;
+      case Kind.PONG:
+        this.pongs++;
+      default:
+        throw new Error(`unknown parser evert ${JSON.stringify(a)}`);
     }
   }
 }
 
-function testSteps(
+// These are almost verbatim ports of the NATS parser tests
+
+function byByteTest(
   data: Uint8Array,
 ): { states: State[]; dispatcher: TestDispatcher } {
   const e = new TestDispatcher();
@@ -68,7 +91,7 @@ Deno.test("parser - ping", () => {
     State.OP_PING,
     State.OP_START,
   ];
-  const results = testSteps(te.encode("PING\r\n"));
+  const results = byByteTest(te.encode("PING\r\n"));
   assertEquals(results.states, states);
   assertEquals(results.dispatcher.pings, 1);
   assertEquals(results.dispatcher.count, 1);
@@ -109,11 +132,11 @@ Deno.test("parser - err", () => {
     State.MINUS_ERR_ARG,
     State.OP_START,
   ];
-  const results = testSteps(te.encode(`-ERR '234 6789'\r\n`));
+  const results = byByteTest(te.encode(`-ERR '234 6789'\r\n`));
   assertEquals(results.states, states);
   assertEquals(results.dispatcher.errs.length, 1);
   assertEquals(results.dispatcher.count, 1);
-  assertEquals(results.dispatcher.errs[0].message, `'234 6789'`);
+  assertEquals(td.decode(results.dispatcher.errs[0].data), `'234 6789'`);
 
   const events = new TestDispatcher();
   const p = new Parser(events);
@@ -121,7 +144,7 @@ Deno.test("parser - err", () => {
   assertEquals(p.state, State.OP_START);
   assertEquals(events.errs.length, 1);
   assertEquals(events.count, 1);
-  assertEquals(events.errs[0].message, `'Any error'`);
+  assertEquals(td.decode(events.errs[0].data), `'Any error'`);
 });
 
 Deno.test("parser - ok", () => {
@@ -133,7 +156,7 @@ Deno.test("parser - ok", () => {
     State.OP_PLUS_OK,
     State.OP_START,
   ];
-  let result = testSteps(te.encode("+OK\r\n"));
+  let result = byByteTest(te.encode("+OK\r\n"));
   assertEquals(result.states, states);
 
   states = [
@@ -146,7 +169,7 @@ Deno.test("parser - ok", () => {
     State.OP_PLUS_OK,
     State.OP_START,
   ];
-  result = testSteps(te.encode("+OKay\r\n"));
+  result = byByteTest(te.encode("+OKay\r\n"));
 
   assertEquals(result.states, states);
 });
@@ -165,7 +188,7 @@ Deno.test("parser - info", () => {
     State.OP_START,
   ];
 
-  const results = testSteps(te.encode(`INFO {}\r\n`));
+  const results = byByteTest(te.encode(`INFO {}\r\n`));
   assertEquals(results.states, states);
   assertEquals(results.dispatcher.infos.length, 1);
   assertEquals(results.dispatcher.count, 1);
@@ -232,7 +255,7 @@ Deno.test("parser - split msg", () => {
   p.parse(te.encode("oo\r\n"));
   assertEquals(d.count, 1);
   assertEquals(d.msgs.length, 1);
-  assertEquals(td.decode(d.msgs[0].msg.subject), "a");
+  assertEquals(td.decode(d.msgs[0].msg?.subject), "a");
   assertEquals(td.decode(d.msgs[0].data), "foo");
   assertEquals(p.msgBuf, undefined);
 
@@ -278,7 +301,7 @@ Deno.test("parser - split msg", () => {
   assertEquals(p.state, State.OP_START);
   assertEquals(p.msgBuf, undefined);
   assertEquals(d.msgs.length, 4);
-  const db = d.msgs[3].data;
+  const db = d.msgs[3].data!;
   assertEquals(td.decode(db.subarray(0, 3)), "foo");
   const gen = db.subarray(3);
   for (let k = 0; k < 100; k++) {
@@ -320,7 +343,7 @@ Deno.test("parser - info arg", () => {
   assertEquals(d.infos.length, 1);
   assertEquals(d.count, 1);
 
-  const arg2 = JSON.parse(td.decode(d.infos[0].info));
+  const arg2 = JSON.parse(td.decode(d.infos[0]?.data));
   assertEquals(arg2, arg);
 
   const good = [
