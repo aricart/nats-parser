@@ -1,5 +1,5 @@
 import { Dispatcher } from "./queued_iterator.ts";
-import { Buffer } from "./buffer.ts";
+import { append, Buffer, concat } from "./buffer.ts";
 
 export type PING = "ping";
 export type PONG = "pong";
@@ -27,93 +27,6 @@ export interface MsgArg {
   size: number;
 }
 
-export function concat(origin?: Uint8Array, b?: Uint8Array): Uint8Array {
-  if (origin === undefined && b === undefined) {
-    return new Uint8Array(0);
-  }
-  if (origin === undefined) {
-    return b!;
-  }
-  if (b === undefined) {
-    return origin;
-  }
-  const output = new Uint8Array(origin.length + b.length);
-  output.set(origin, 0);
-  output.set(b, origin.length);
-  return output;
-}
-
-export function append(origin: Uint8Array, b: number): Uint8Array {
-  return concat(origin, Uint8Array.of(b));
-}
-
-export enum State {
-  OP_START = 0,
-  OP_PLUS,
-  OP_PLUS_O,
-  OP_PLUS_OK,
-  OP_MINUS,
-  OP_MINUS_E,
-  OP_MINUS_ER,
-  OP_MINUS_ERR,
-  OP_MINUS_ERR_SPC,
-  MINUS_ERR_ARG,
-  OP_M,
-  OP_MS,
-  OP_MSG,
-  OP_MSG_SPC,
-  MSG_ARG,
-  MSG_PAYLOAD,
-  MSG_END,
-  OP_H,
-  OP_P,
-  OP_PI,
-  OP_PIN,
-  OP_PING,
-  OP_PO,
-  OP_PON,
-  OP_PONG,
-  OP_I,
-  OP_IN,
-  OP_INF,
-  OP_INFO,
-  OP_INFO_SPC,
-  INFO_ARG,
-}
-
-enum cc {
-  CR = "\r".charCodeAt(0),
-  E = "E".charCodeAt(0),
-  e = "e".charCodeAt(0),
-  F = "F".charCodeAt(0),
-  f = "f".charCodeAt(0),
-  G = "G".charCodeAt(0),
-  g = "g".charCodeAt(0),
-  H = "H".charCodeAt(0),
-  h = "h".charCodeAt(0),
-  I = "I".charCodeAt(0),
-  i = "i".charCodeAt(0),
-  K = "K".charCodeAt(0),
-  k = "k".charCodeAt(0),
-  M = "M".charCodeAt(0),
-  m = "m".charCodeAt(0),
-  MINUS = "-".charCodeAt(0),
-  N = "N".charCodeAt(0),
-  n = "n".charCodeAt(0),
-  NL = "\n".charCodeAt(0),
-  O = "O".charCodeAt(0),
-  o = "o".charCodeAt(0),
-  P = "P".charCodeAt(0),
-  p = "p".charCodeAt(0),
-  PLUS = "+".charCodeAt(0),
-  R = "R".charCodeAt(0),
-  r = "r".charCodeAt(0),
-  S = "S".charCodeAt(0),
-  s = "s".charCodeAt(0),
-  SPACE = " ".charCodeAt(0),
-  TAB = "\t".charCodeAt(0),
-}
-
 const td = new TextDecoder();
 
 export class Parser {
@@ -123,14 +36,14 @@ export class Parser {
   drop: number = 0;
   hdr: number = 0;
   ma: MsgArg = {} as MsgArg;
-  argBuf?: Uint8Array;
+  argBuf?: Buffer;
   msgBuf?: Buffer;
   scratch: Buffer;
 
   constructor(dispatcher: Dispatcher<ParserEvents>) {
     this.dispatcher = dispatcher;
     this.state = State.OP_START;
-    this.scratch = new Buffer(new Uint8Array(MAX_CONTROL_LINE_SIZE));
+    this.scratch = new Buffer();
   }
 
   parse(buf: Uint8Array): void {
@@ -227,7 +140,7 @@ export class Parser {
               break;
             case cc.NL:
               const arg: Uint8Array = this.argBuf
-                ? this.argBuf
+                ? this.argBuf.bytes()
                 : buf.subarray(this.as, i - this.drop);
               this.processMsgArgs(arg);
               this.drop = 0;
@@ -240,7 +153,7 @@ export class Parser {
               break;
             default:
               if (this.argBuf) {
-                this.argBuf = append(this.argBuf, b);
+                this.argBuf.write(Uint8Array.of(b));
               }
           }
           break;
@@ -374,7 +287,7 @@ export class Parser {
             case cc.NL:
               let arg: Uint8Array;
               if (this.argBuf) {
-                arg = this.argBuf;
+                arg = this.argBuf.bytes();
                 this.argBuf = undefined;
               } else {
                 arg = buf.subarray(this.as, i - this.drop);
@@ -386,7 +299,7 @@ export class Parser {
               break;
             default:
               if (this.argBuf) {
-                this.argBuf = append(this.argBuf, b);
+                this.argBuf.write(Uint8Array.of(b));
               }
           }
           break;
@@ -520,7 +433,7 @@ export class Parser {
             case cc.NL:
               let arg: Uint8Array;
               if (this.argBuf) {
-                arg = this.argBuf;
+                arg = this.argBuf.bytes();
                 this.argBuf = undefined;
               } else {
                 arg = buf.subarray(this.as, i - this.drop);
@@ -531,9 +444,13 @@ export class Parser {
               this.state = State.OP_START;
               break;
             default:
-              throw this.fail(buf.subarray(i));
+              if (this.argBuf) {
+                this.argBuf.write(Uint8Array.of(b));
+              }
           }
           break;
+        default:
+          throw this.fail(buf.subarray(i));
       }
     }
 
@@ -541,7 +458,7 @@ export class Parser {
       (this.state === State.MSG_ARG || this.state === State.MINUS_ERR_ARG ||
         this.state === State.INFO_ARG) && !this.argBuf
     ) {
-      this.argBuf = concat(this.argBuf, buf.subarray(this.as, i - this.drop));
+      this.argBuf = new Buffer(buf.subarray(this.as, i - this.drop));
     }
 
     if (this.state === State.MSG_PAYLOAD && !this.msgBuf) {
@@ -554,12 +471,17 @@ export class Parser {
   }
 
   cloneMsgArg() {
-    this.argBuf = new Uint8Array(0);
-    this.argBuf = concat(this.argBuf, this.ma.subject);
-    this.argBuf = concat(this.argBuf, this.ma.reply);
-    this.ma.subject = this.argBuf.subarray(0, this.ma.subject.length);
+    const s = this.ma.subject.length;
+    const r = this.ma.reply ? this.ma.reply.length : 0;
+    const buf = new Uint8Array(s + r);
+    buf.set(this.ma.subject);
     if (this.ma.reply) {
-      this.ma.reply = this.argBuf.subarray(this.ma.subject.length);
+      buf.set(this.ma.reply, s);
+    }
+    this.argBuf = new Buffer(buf);
+    this.ma.subject = buf.subarray(0, s);
+    if (this.ma.reply) {
+      this.ma.reply = buf.subarray(r);
     }
   }
 
@@ -696,4 +618,71 @@ export class Parser {
       return -1;
     }
   }
+}
+
+export enum State {
+  OP_START = 0,
+  OP_PLUS,
+  OP_PLUS_O,
+  OP_PLUS_OK,
+  OP_MINUS,
+  OP_MINUS_E,
+  OP_MINUS_ER,
+  OP_MINUS_ERR,
+  OP_MINUS_ERR_SPC,
+  MINUS_ERR_ARG,
+  OP_M,
+  OP_MS,
+  OP_MSG,
+  OP_MSG_SPC,
+  MSG_ARG,
+  MSG_PAYLOAD,
+  MSG_END,
+  OP_H,
+  OP_P,
+  OP_PI,
+  OP_PIN,
+  OP_PING,
+  OP_PO,
+  OP_PON,
+  OP_PONG,
+  OP_I,
+  OP_IN,
+  OP_INF,
+  OP_INFO,
+  OP_INFO_SPC,
+  INFO_ARG,
+}
+
+enum cc {
+  CR = "\r".charCodeAt(0),
+  E = "E".charCodeAt(0),
+  e = "e".charCodeAt(0),
+  F = "F".charCodeAt(0),
+  f = "f".charCodeAt(0),
+  G = "G".charCodeAt(0),
+  g = "g".charCodeAt(0),
+  H = "H".charCodeAt(0),
+  h = "h".charCodeAt(0),
+  I = "I".charCodeAt(0),
+  i = "i".charCodeAt(0),
+  K = "K".charCodeAt(0),
+  k = "k".charCodeAt(0),
+  M = "M".charCodeAt(0),
+  m = "m".charCodeAt(0),
+  MINUS = "-".charCodeAt(0),
+  N = "N".charCodeAt(0),
+  n = "n".charCodeAt(0),
+  NL = "\n".charCodeAt(0),
+  O = "O".charCodeAt(0),
+  o = "o".charCodeAt(0),
+  P = "P".charCodeAt(0),
+  p = "p".charCodeAt(0),
+  PLUS = "+".charCodeAt(0),
+  R = "R".charCodeAt(0),
+  r = "r".charCodeAt(0),
+  S = "S".charCodeAt(0),
+  s = "s".charCodeAt(0),
+  SPACE = " ".charCodeAt(0),
+  TAB = "\t".charCodeAt(0),
 }

@@ -4,8 +4,8 @@
 // Copyright 2009 The Go Authors. All rights reserved. BSD license.
 // https://github.com/golang/go/blob/master/LICENSE
 
-// Removed Reader/Writer, uses of `#` for private fields as this is not
-// supported in some browsers.
+// This code removes all Deno specific functionality to enable its use
+// in a browser environment
 
 //@internal
 export class AssertionError extends Error {
@@ -15,6 +15,14 @@ export class AssertionError extends Error {
   }
 }
 
+export interface Reader {
+  read(p: Uint8Array): number | null;
+}
+
+export interface Writer {
+  write(p: Uint8Array): number;
+}
+
 // @internal
 export function assert(cond: unknown, msg = "Assertion failed."): asserts cond {
   if (!cond) {
@@ -22,12 +30,18 @@ export function assert(cond: unknown, msg = "Assertion failed."): asserts cond {
   }
 }
 
-const MAX_SIZE = 2 ** 32 - 2;
+// MIN_READ is the minimum ArrayBuffer size passed to a read call by
+// buffer.ReadFrom. As long as the Buffer has at least MIN_READ bytes beyond
+// what is required to hold the contents of r, readFrom() will not grow the
+// underlying buffer.
+const MIN_READ = 32 * 1024;
+
+export const MAX_SIZE = 2 ** 32 - 2;
 
 // `off` is the offset into `dst` where it will at which to begin writing values
 // from `src`.
 // Returns the number of bytes copied.
-function copyBytes(src: Uint8Array, dst: Uint8Array, off = 0): number {
+function copy(src: Uint8Array, dst: Uint8Array, off = 0): number {
   const r = dst.byteLength - off;
   if (src.byteLength > r) {
     src = src.subarray(0, r);
@@ -36,7 +50,27 @@ function copyBytes(src: Uint8Array, dst: Uint8Array, off = 0): number {
   return src.byteLength;
 }
 
-export class Buffer {
+export function concat(origin?: Uint8Array, b?: Uint8Array): Uint8Array {
+  if (origin === undefined && b === undefined) {
+    return new Uint8Array(0);
+  }
+  if (origin === undefined) {
+    return b!;
+  }
+  if (b === undefined) {
+    return origin;
+  }
+  const output = new Uint8Array(origin.length + b.length);
+  output.set(origin, 0);
+  output.set(b, origin.length);
+  return output;
+}
+
+export function append(origin: Uint8Array, b: number): Uint8Array {
+  return concat(origin, Uint8Array.of(b));
+}
+
+export class Buffer implements Reader, Writer {
   _buf: Uint8Array; // contents are the bytes _buf[off : len(_buf)]
   _off = 0; // read at _buf[off], write at _buf[_buf.byteLength]
 
@@ -96,6 +130,14 @@ export class Buffer {
     this._buf = new Uint8Array(this._buf.buffer, 0, len);
   };
 
+  readByte(): number | null {
+    const a = new Uint8Array(1);
+    if (this.read(a)) {
+      return a[0];
+    }
+    return null;
+  }
+
   read(p: Uint8Array): number | null {
     if (this.empty()) {
       // Buffer is empty, reset to recover space.
@@ -106,14 +148,18 @@ export class Buffer {
       }
       return null;
     }
-    const nread = copyBytes(this._buf.subarray(this._off), p);
+    const nread = copy(this._buf.subarray(this._off), p);
     this._off += nread;
     return nread;
   }
 
+  writeByte(n: number): number {
+    return this.write(Uint8Array.of(n));
+  }
+
   write(p: Uint8Array): number {
     const m = this._grow(p.byteLength);
-    return copyBytes(p, this._buf, m);
+    return copy(p, this._buf, m);
   }
 
   _grow = (n: number): number => {
@@ -133,13 +179,13 @@ export class Buffer {
       // ArrayBuffer. We only need m+n <= c to slide, but
       // we instead let capacity get twice as large so we
       // don't spend all our time copying.
-      copyBytes(this._buf.subarray(this._off), this._buf);
+      copy(this._buf.subarray(this._off), this._buf);
     } else if (c + n > MAX_SIZE) {
       throw new Error("The buffer cannot be grown beyond the maximum size.");
     } else {
       // Not enough space anywhere, we need to allocate.
       const buf = new Uint8Array(Math.min(2 * c + n, MAX_SIZE));
-      copyBytes(this._buf.subarray(this._off), buf);
+      copy(this._buf.subarray(this._off), buf);
       this._buf = buf;
     }
     // Restore this.off and len(this._buf).
@@ -154,5 +200,42 @@ export class Buffer {
     }
     const m = this._grow(n);
     this._reslice(m);
+  }
+
+  readFrom(r: Reader): number {
+    let n = 0;
+    const tmp = new Uint8Array(MIN_READ);
+    while (true) {
+      const shouldGrow = this.capacity - this.length < MIN_READ;
+      // read into tmp buffer if there's not enough room
+      // otherwise read directly into the internal buffer
+      const buf = shouldGrow
+        ? tmp
+        : new Uint8Array(this._buf.buffer, this.length);
+
+      const nread = r.read(buf);
+      if (nread === null) {
+        return n;
+      }
+
+      // write will grow if needed
+      if (shouldGrow) this.write(buf.subarray(0, nread));
+      else this._reslice(this.length + nread);
+
+      n += nread;
+    }
+  }
+}
+
+export function readAll(r: Reader): Uint8Array {
+  const buf = new Buffer();
+  buf.readFrom(r);
+  return buf.bytes();
+}
+
+export function writeAll(w: Writer, arr: Uint8Array): void {
+  let nwritten = 0;
+  while (nwritten < arr.length) {
+    nwritten += w.write(arr.subarray(nwritten));
   }
 }
