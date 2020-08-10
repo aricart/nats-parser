@@ -1,5 +1,5 @@
 import { Dispatcher } from "./queued_iterator.ts";
-import { append, Buffer, concat } from "./buffer.ts";
+import { Buffer } from "./buffer.ts";
 
 export type PING = "ping";
 export type PONG = "pong";
@@ -14,8 +14,6 @@ export interface Msg {
   msg: MsgArg;
   data: Uint8Array;
 }
-
-const MAX_CONTROL_LINE_SIZE = 4096;
 
 export type ParserEvents = PING | PONG | OK | Err | Info | Msg;
 
@@ -153,7 +151,7 @@ export class Parser {
               break;
             default:
               if (this.argBuf) {
-                this.argBuf.write(Uint8Array.of(b));
+                this.argBuf.writeByte(b);
               }
           }
           break;
@@ -177,7 +175,7 @@ export class Parser {
                 this.msgBuf.write(buf.subarray(i, i + toCopy));
                 i = (i + toCopy) - 1;
               } else {
-                this.msgBuf.write(Uint8Array.of(b));
+                this.msgBuf.writeByte(b);
               }
             }
           } else if (i - this.as >= this.ma.size) {
@@ -445,7 +443,7 @@ export class Parser {
               break;
             default:
               if (this.argBuf) {
-                this.argBuf.write(Uint8Array.of(b));
+                this.argBuf.writeByte(b);
               }
           }
           break;
