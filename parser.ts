@@ -29,10 +29,10 @@ const td = new TextDecoder();
 
 export class Parser {
   dispatcher: Dispatcher<ParserEvents>;
-  state: State = State.OP_START;
-  as: number = 0;
-  drop: number = 0;
-  hdr: number = 0;
+  state = State.OP_START;
+  as = 0;
+  drop = 0;
+  hdr = 0;
   ma: MsgArg = {} as MsgArg;
   argBuf?: Buffer;
   msgBuf?: Buffer;
@@ -537,7 +537,7 @@ export class Parser {
     }
   }
 
-  fail(data: Uint8Array, label: string = ""): Error {
+  fail(data: Uint8Array, label = ""): Error {
     if (!label) {
       label = `parse error [${this.state}]`;
     } else {

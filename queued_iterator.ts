@@ -1,6 +1,6 @@
 export interface Deferred<T> extends Promise<T> {
   resolve: (value?: T | PromiseLike<T>) => void;
-  //@ts-ignore
+  // deno-lint-ignore no-explicit-any
   reject: (reason?: any) => void;
 }
 
@@ -9,8 +9,8 @@ export function deferred<T>(): Deferred<T> {
   const p = new Promise<T>((resolve, reject): void => {
     methods = { resolve, reject };
   });
-  //@ts-ignore
-  return Object.assign(p, methods) as Deferred<T>;
+
+  return Object.assign(p, methods!) as Deferred<T>;
 }
 
 export interface Dispatcher<T> {
@@ -20,7 +20,7 @@ export interface Dispatcher<T> {
 export class QueuedIteratorImpl<T> implements Dispatcher<T> {
   processed = 0;
   received = 0; // this is updated by the protocol
-  protected done: boolean = false;
+  protected done = false;
   private signal: Deferred<void> = deferred<void>();
   private yields: T[] = [];
   private err?: Error;

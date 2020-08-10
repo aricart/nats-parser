@@ -14,10 +14,10 @@ class NoopDispatcher implements Dispatcher<ParserEvents> {
 }
 
 class TestDispatcher implements Dispatcher<ParserEvents> {
-  count: number = 0;
-  pings: number = 0;
-  pongs: number = 0;
-  ok: number = 0;
+  count = 0;
+  pings = 0;
+  pongs = 0;
+  ok = 0;
   errs: Err[] = [];
   infos: Info[] = [];
   msgs: Msg[] = [];
