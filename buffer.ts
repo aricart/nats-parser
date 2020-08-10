@@ -38,6 +38,8 @@ const MIN_READ = 32 * 1024;
 
 export const MAX_SIZE = 2 ** 32 - 2;
 
+const te = new TextEncoder();
+
 // `off` is the offset into `dst` where it will at which to begin writing values
 // from `src`.
 // Returns the number of bytes copied.
@@ -155,6 +157,10 @@ export class Buffer implements Reader, Writer {
 
   writeByte(n: number): number {
     return this.write(Uint8Array.of(n));
+  }
+
+  writeString(s: string): number {
+    return this.write(te.encode(s));
   }
 
   write(p: Uint8Array): number {

@@ -11,7 +11,6 @@ import {
   assertEquals,
   assert,
   assertThrows,
-  assertThrowsAsync,
 } from "https://deno.land/std@0.63.0/testing/asserts.ts";
 import { Buffer, MAX_SIZE, readAll, writeAll } from "./buffer.ts";
 
@@ -130,9 +129,6 @@ Deno.test("buffer - basic operations", () => {
 
     empty(buf, testString.slice(0, 20), new Uint8Array(5));
     empty(buf, "", new Uint8Array(100));
-
-    // TODO buf.writeByte()
-    // TODO buf.readByte()
   }
 });
 
@@ -144,6 +140,21 @@ Deno.test("buffer - read/write byte", () => {
   buf.writeByte("a".charCodeAt(0));
   const a = String.fromCharCode(buf.readByte()!);
   assertEquals(a, "a");
+});
+
+Deno.test("buffer - write string", () => {
+  const buf = new Buffer();
+  const s = "MSG a 1 b 6\r\nfoobar";
+  buf.writeString(s);
+  const rs = new TextDecoder().decode(buf.bytes());
+  assertEquals(rs, s);
+});
+
+Deno.test("buffer - write empty string", () => {
+  const buf = new Buffer();
+  buf.writeString("");
+  assertEquals(buf.length, 0);
+  assertEquals(buf.capacity, 0);
 });
 
 Deno.test("buffer - read empty at EOF", () => {
@@ -202,7 +213,7 @@ Deno.test("buffer - grow write max buffer", () => {
   }
 });
 
-Deno.test(" buffer - grow read close max buffer plus 1", () => {
+Deno.test("buffer - grow read close max buffer plus 1", () => {
   const reader = new Buffer(new ArrayBuffer(MAX_SIZE + 1));
   const buf = new Buffer();
 
